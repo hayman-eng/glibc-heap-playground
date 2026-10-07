@@ -1,0 +1,910 @@
+<title>Glibc Heap Playground</title>
+<style>
+  /* Layout: left control rail · center heap memory map · right bin lists · full-width op log.
+     Collapses to a single column at phone width. Debugger/hex-dump identity. */
+  :root{
+    --bg:#f4f5f7; --surface:#ffffff; --surface-2:#eceef2; --inset:#e7eaf0;
+    --fg:#1b2130; --muted:#5b6475; --faint:#9aa2b2;
+    --line:#d7dbe3; --line-2:#c6ccd6;
+    --accent:#9a5a2b; --accent-soft:rgba(154,90,43,.12);
+    --alloc:#1d7a6c; --alloc-soft:rgba(29,122,108,.12);
+    --freed:#b23b4e; --freed-soft:rgba(178,59,78,.12);
+    --top:#5d4bb0; --top-soft:rgba(93,75,176,.12);
+    --warn:#b5770a; --warn-soft:rgba(181,119,10,.14);
+    --flash:rgba(154,90,43,.26);
+    --mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --sans:"IBM Plex Sans",ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+    --bg:#0e1320; --surface:#151b2a; --surface-2:#1b2234; --inset:#111726;
+    --fg:#e6e9f0; --muted:#8a93a8; --faint:#5e6880;
+    --line:#293245; --line-2:#36405a;
+    --accent:#d98a4e; --accent-soft:rgba(217,138,78,.14);
+    --alloc:#3fb9a6; --alloc-soft:rgba(63,185,166,.14);
+    --freed:#e0697c; --freed-soft:rgba(224,105,124,.15);
+    --top:#9d8bf0; --top-soft:rgba(157,139,240,.15);
+    --warn:#e0a93a; --warn-soft:rgba(224,169,58,.15);
+    --flash:rgba(217,138,78,.2);
+    color-scheme:dark;
+  }}
+  :root[data-theme="dark"]{
+    --bg:#0e1320; --surface:#151b2a; --surface-2:#1b2234; --inset:#111726;
+    --fg:#e6e9f0; --muted:#8a93a8; --faint:#5e6880;
+    --line:#293245; --line-2:#36405a;
+    --accent:#d98a4e; --accent-soft:rgba(217,138,78,.14);
+    --alloc:#3fb9a6; --alloc-soft:rgba(63,185,166,.14);
+    --freed:#e0697c; --freed-soft:rgba(224,105,124,.15);
+    --top:#9d8bf0; --top-soft:rgba(157,139,240,.15);
+    --warn:#e0a93a; --warn-soft:rgba(224,169,58,.15);
+    --flash:rgba(217,138,78,.2);
+    color-scheme:dark;
+  }
+
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{background:var(--bg);color:var(--fg);font-family:var(--sans);line-height:1.45;
+    font-size:14px;-webkit-font-smoothing:antialiased;}
+  button,input,select{font-family:inherit}
+  h1,h2,h3{text-wrap:balance;margin:0}
+
+  .wrap{max-width:1320px;margin:0 auto;padding-block:0 28px;padding-inline:16px;}
+
+  header.top{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;
+    background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--line);
+    margin-inline:-16px;padding:14px 16px 12px;display:flex;flex-wrap:wrap;gap:12px 18px;align-items:baseline;}
+  header.top .brand{display:flex;flex-direction:column;gap:2px}
+  header.top h1{font-size:19px;font-weight:600;letter-spacing:-.01em}
+  header.top h1 .g{color:var(--accent)}
+  header.top .sub{color:var(--muted);font-size:12.5px;font-family:var(--mono)}
+  header.top .right{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .chip{font-family:var(--mono);font-size:11px;color:var(--muted);border:1px solid var(--line);
+    border-radius:999px;padding:3px 9px;white-space:nowrap}
+  .chip b{color:var(--fg);font-weight:600}
+
+  .grid{display:grid;grid-template-columns:276px minmax(0,1fr) 300px;gap:14px;margin-top:16px;align-items:start}
+  @media (max-width:1080px){.grid{grid-template-columns:260px minmax(0,1fr);}
+    .panel.bins{grid-column:1 / -1}}
+  @media (max-width:760px){.grid{grid-template-columns:1fr}}
+
+  .panel{background:var(--surface);border:1px solid var(--line);border-radius:12px;min-width:0}
+  .panel > .ph{display:flex;align-items:center;gap:8px;padding:11px 14px;border-bottom:1px solid var(--line)}
+  .panel > .ph h2{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+  .panel > .ph .count{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--faint)}
+  .panel .body{padding:14px}
+
+  /* ---- controls ---- */
+  .ctl{display:flex;flex-direction:column;gap:7px;margin-bottom:16px}
+  .ctl:last-child{margin-bottom:0}
+  .ctl > label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+  .row{display:flex;gap:7px;align-items:stretch}
+  input[type=number],input[type=text],select{background:var(--inset);border:1px solid var(--line-2);
+    color:var(--fg);border-radius:8px;padding:8px 9px;font-size:13px;min-width:0;width:100%}
+  input[type=text]{font-family:var(--mono);font-size:12.5px}
+  input:focus,select:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:transparent}
+  button{cursor:pointer;border:1px solid var(--line-2);background:var(--surface-2);color:var(--fg);
+    border-radius:8px;padding:8px 12px;font-size:13px;font-weight:500;white-space:nowrap;transition:background .12s,border-color .12s}
+  button:hover{border-color:var(--accent)}
+  button:active{transform:translateY(1px)}
+  button.go{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  button.go:hover{filter:brightness(1.06)}
+  button.ghost{background:transparent}
+  button.sm{padding:6px 9px;font-size:12px}
+  button:disabled{opacity:.42;cursor:not-allowed}
+  button:disabled:hover{border-color:var(--line-2)}
+  .btn-w{flex:1}
+
+  .opts{display:flex;flex-direction:column;gap:9px}
+  .opt{display:flex;align-items:center;gap:9px;font-size:12.5px;color:var(--fg)}
+  .opt input[type=checkbox]{width:16px;height:16px;accent-color:var(--accent);flex:none}
+  .opt .tn{margin-left:auto;font-family:var(--mono);color:var(--muted);font-size:11.5px}
+  .opt.sz select,.opt.sz input{width:64px;flex:none}
+  .hint{font-size:11.5px;color:var(--faint);line-height:1.4}
+
+  .scn{display:flex;flex-direction:column;gap:6px}
+  .scn button{display:flex;flex-direction:column;align-items:flex-start;gap:1px;text-align:left;padding:9px 11px}
+  .scn button .t{font-weight:600;font-size:12.5px}
+  .scn button .d{font-weight:400;font-size:11px;color:var(--muted);font-family:var(--mono)}
+
+  /* ---- pending queue ---- */
+  .queue{border:1px dashed var(--line-2);border-radius:10px;padding:10px;background:var(--inset);margin-bottom:14px}
+  .queue.empty{display:none}
+  .queue .qh{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+  .queue .qh .qt{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--accent)}
+  .queue .qh .qn{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .qlist{display:flex;flex-direction:column;gap:3px;font-family:var(--mono);font-size:12px;max-height:150px;overflow:auto}
+  .qlist .qi{padding:3px 7px;border-radius:6px;color:var(--muted);display:flex;gap:7px}
+  .qlist .qi.next{background:var(--accent-soft);color:var(--fg)}
+  .qlist .qi.done{opacity:.4;text-decoration:line-through}
+  .qlist .qi .qx{color:var(--faint)}
+  .qbtns{display:flex;gap:7px;margin-top:9px}
+
+  /* ---- heap map ---- */
+  .heap{display:flex;flex-direction:column;gap:7px}
+  .region{font-family:var(--mono);font-size:11px;color:var(--faint);display:flex;align-items:center;gap:8px;padding:2px 2px 4px}
+  .region::before,.region::after{content:"";height:1px;background:var(--line);flex:1}
+  .chunk{border:1px solid var(--line);border-radius:9px;overflow:hidden;position:relative}
+  .chunk .cbar{position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--line-2)}
+  .chunk.alloc .cbar{background:var(--alloc)}
+  .chunk.freed .cbar{background:var(--freed)}
+  .chunk.topc .cbar{background:var(--top)}
+  .chunk.fake{border-style:dashed;border-color:var(--warn)}
+  .chunk.fake .cbar{background:var(--warn)}
+  .chunk .crow{display:grid;grid-template-columns:132px 1fr auto;gap:10px;align-items:center;padding:8px 11px 8px 14px}
+  .chunk .addr{font-family:var(--mono);font-size:12px;color:var(--muted);white-space:nowrap}
+  .chunk .mid{font-family:var(--mono);font-size:12.5px;min-width:0}
+  .chunk .mid .lab{font-weight:600;color:var(--fg)}
+  .chunk .mid .meta{color:var(--muted)}
+  .chunk .sz{font-family:var(--mono);font-size:12px;color:var(--fg);text-align:right;white-space:nowrap}
+  .chunk .flags{font-size:10.5px;color:var(--faint)}
+  .tag{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;border-radius:5px;padding:2px 6px;white-space:nowrap}
+  .tag.alloc{color:var(--alloc);background:var(--alloc-soft)}
+  .tag.freed{color:var(--freed);background:var(--freed-soft)}
+  .tag.top{color:var(--top);background:var(--top-soft)}
+  .tag.fake{color:var(--warn);background:var(--warn-soft)}
+  .chunk .fd{border-top:1px dashed var(--line);padding:6px 11px 7px 14px;font-family:var(--mono);font-size:11.5px;
+    color:var(--muted);display:flex;flex-wrap:wrap;gap:4px 16px;background:var(--inset)}
+  .chunk .fd b{color:var(--fg);font-weight:600}
+  .chunk .fd .mg{color:var(--warn)}
+  .chunk.flash{animation:fl 1s ease-out}
+  @keyframes fl{0%{box-shadow:0 0 0 2px var(--flash),0 0 0 6px var(--flash)}100%{box-shadow:0 0 0 0 transparent}}
+  @media (prefers-reduced-motion:reduce){.chunk.flash{animation:none;box-shadow:0 0 0 2px var(--accent)}}
+  .empty-note{color:var(--faint);font-size:12.5px;font-family:var(--mono);padding:14px 2px;text-align:center}
+
+  /* ---- bins ---- */
+  .binsec{margin-bottom:16px}
+  .binsec:last-child{margin-bottom:0}
+  .binsec > h3{font-size:11.5px;font-weight:600;color:var(--fg);display:flex;align-items:baseline;gap:7px;margin-bottom:7px}
+  .binsec > h3 .sc{font-family:var(--mono);font-size:10.5px;color:var(--faint);font-weight:400}
+  .bin{font-family:var(--mono);font-size:12px;display:flex;flex-wrap:wrap;align-items:center;gap:4px;
+    padding:6px 8px;border:1px solid var(--line);border-radius:7px;margin-bottom:5px;background:var(--inset)}
+  .bin .bk{color:var(--accent);font-weight:600;flex:none}
+  .bin .cnt{color:var(--faint);flex:none}
+  .bin .node{color:var(--fg);background:var(--surface-2);border:1px solid var(--line-2);border-radius:5px;padding:1px 6px}
+  .bin .node.fakeN{color:var(--warn);border-color:var(--warn);border-style:dashed}
+  .bin .arrow{color:var(--faint);flex:none}
+  .bin .nul{color:var(--faint)}
+  .bins-empty{color:var(--faint);font-size:12px;font-family:var(--mono)}
+
+  /* ---- log ---- */
+  .panel.log{grid-column:1 / -1;margin-top:0}
+  .logbox{font-family:var(--mono);font-size:12.5px;line-height:1.55;max-height:230px;overflow:auto;
+    padding:12px 14px;display:flex;flex-direction:column;gap:1px}
+  .logbox .ln{white-space:pre-wrap;word-break:break-word}
+  .logbox .ln.io{color:var(--fg)}
+  .logbox .ln.ok{color:var(--alloc)}
+  .logbox .ln.rm{color:var(--freed)}
+  .logbox .ln.ab{color:var(--freed);font-weight:700}
+  .logbox .ln.in{color:var(--muted)}
+  .logbox .ln.cm{color:var(--faint)}
+  .logbox .ln .p{color:var(--accent)}
+
+  details.doc{margin-top:16px;border:1px solid var(--line);border-radius:12px;background:var(--surface);overflow:hidden}
+  details.doc summary{cursor:pointer;padding:12px 16px;font-weight:600;font-size:13px;list-style:none;display:flex;align-items:center;gap:8px}
+  details.doc summary::-webkit-details-marker{display:none}
+  details.doc summary::before{content:"+";color:var(--accent);font-family:var(--mono);font-weight:700}
+  details.doc[open] summary::before{content:"\2212"}
+  details.doc .dc{padding:4px 18px 18px;font-size:13px;color:var(--fg);max-width:70ch}
+  details.doc .dc p{margin:10px 0}
+  details.doc .dc h4{margin:16px 0 6px;font-size:12.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--accent)}
+  details.doc .dc code{font-family:var(--mono);font-size:12px;background:var(--inset);padding:1px 5px;border-radius:4px}
+  details.doc .dc ul{margin:8px 0;padding-left:20px}
+  details.doc .dc li{margin:4px 0}
+  details.doc .dc .cs{color:var(--muted)}
+  a{color:var(--accent)}
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <h1><span class="g">glibc</span> heap playground</h1>
+      <div class="sub">tcache · fastbins · unsorted, step through malloc/free</div>
+    </div>
+    <div class="right">
+      <span class="chip">arena <b>main</b></span>
+      <span class="chip">model <b id="verchip">~2.39</b></span>
+      <span class="chip">base <b id="basechip">0x…</b></span>
+    </div>
+  </header>
+
+  <div class="grid">
+    <!-- ================= CONTROLS ================= -->
+    <section class="panel" aria-label="controls">
+      <div class="ph"><h2>Controls</h2></div>
+      <div class="body">
+
+        <div class="ctl">
+          <label for="mreq">malloc(size)</label>
+          <div class="row">
+            <input type="number" id="mreq" min="0" max="200000" value="24" step="8" aria-label="request size in bytes">
+            <button class="go" id="mbtn">malloc</button>
+          </div>
+          <div class="hint" id="m2s">request 24 → chunk 0x20 · tcache idx 0</div>
+        </div>
+
+        <div class="ctl">
+          <label for="fsel">free(ptr)</label>
+          <div class="row">
+            <select id="fsel" aria-label="pointer to free"></select>
+            <button id="fbtn">free</button>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <label for="esel">edit(ptr): overwrite fd / key</label>
+          <select id="esel" aria-label="chunk to edit" style="margin-bottom:7px"></select>
+          <div class="row" style="margin-bottom:7px">
+            <input type="text" id="enext" placeholder="fd / next  (0x… target)" aria-label="new fd/next pointer">
+          </div>
+          <div class="row">
+            <input type="text" id="ekey" placeholder="key  (0x0 to clear)" aria-label="new key value">
+            <button id="ebtn">write</button>
+          </div>
+          <div class="hint">point a freed chunk's fd at <code>target</code>, then malloc it back out.</div>
+        </div>
+
+        <div class="ctl">
+          <label>options</label>
+          <div class="opts">
+            <div class="opt">
+              <input type="checkbox" id="osafe" checked>
+              <label for="osafe" style="cursor:pointer">safe-linking (2.32+)</label>
+              <span class="tn">fd = (pos»12)^ptr</span>
+            </div>
+            <div class="opt sz">
+              <label for="otc" style="cursor:pointer;flex:1">tcache bin limit</label>
+              <input type="number" id="otc" min="1" max="20" value="7">
+            </div>
+            <div class="hint">a bin holds up to the limit; overflow frees spill to fastbin / unsorted.</div>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <label>scenarios</label>
+          <div class="scn" id="scn"></div>
+        </div>
+
+        <div class="ctl">
+          <div class="row">
+            <button class="ghost btn-w" id="rbtn">reset heap</button>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ================= HEAP MAP ================= -->
+    <section class="panel" aria-label="heap memory">
+      <div class="ph"><h2>Heap memory</h2><span class="count" id="heapcount"></span></div>
+      <div class="body">
+        <div class="queue empty" id="queue">
+          <div class="qh"><span class="qt" id="qtitle">queued steps</span><span class="qn" id="qn"></span></div>
+          <div class="qlist" id="qlist"></div>
+          <div class="qbtns">
+            <button class="go sm btn-w" id="stepbtn">step ▶</button>
+            <button class="sm btn-w" id="runbtn">run all ⏩</button>
+            <button class="ghost sm" id="clrq">clear</button>
+          </div>
+        </div>
+        <div class="heap" id="heap"></div>
+      </div>
+    </section>
+
+    <!-- ================= BINS ================= -->
+    <section class="panel bins" aria-label="free bins">
+      <div class="ph"><h2>Free bins</h2></div>
+      <div class="body" id="bins"></div>
+    </section>
+
+    <!-- ================= LOG ================= -->
+    <section class="panel log">
+      <div class="ph"><h2>Operation log</h2><span class="count" id="opcount"></span></div>
+      <div class="logbox" id="log"></div>
+    </section>
+  </div>
+
+  <details class="doc">
+    <summary>What this models (and what it simplifies)</summary>
+    <div class="dc">
+      <p>A faithful teaching model of the ptmalloc free-chunk fast paths in glibc ~2.31–2.39 on x86-64. The point is to make the invisible linked lists visible while you drive <code>malloc</code> and <code>free</code> by hand.</p>
+      <h4>Allocation path (malloc)</h4>
+      <p><code>request2size</code> rounds up: <code>chunk = max(0x20, (req + 8 + 15) &amp; ~15)</code>. The usable bytes reuse the next chunk's <code>prev_size</code>, so a <code>0x20</code> chunk serves 24 bytes. A request is satisfied in order: exact-size <b>tcache</b> bin → exact-size <b>fastbin</b> → first fit in the <b>unsorted bin</b> (split, remainder returns to unsorted) → carve from the <b>top</b> chunk.</p>
+      <h4>Free path</h4>
+      <p>A freed chunk lands in <b>tcache</b> if its size is ≤ <code>0x410</code> and the bin isn't full. Otherwise, if size ≤ <code>0x80</code> it goes to a <b>fastbin</b>; else to the <b>unsorted bin</b>. tcache and fastbin are singly linked (LIFO via <code>fd</code>); unsorted is doubly linked.</p>
+      <h4>Hardening you can defeat</h4>
+      <ul>
+        <li><b>tcache double-free</b> (since 2.29): each tcache entry carries a <code>key</code>. On free, a matching key triggers a scan of the bin; a hit aborts with <span class="cs">free(): double free detected in tcache 2</span>. Clear the key with <code>edit</code> to slip past it.</li>
+        <li><b>fastbin double-free</b>: a single check compares the incoming chunk against the bin head (<span class="cs">double free or corruption (fasttop)</span>). Free a second chunk in between and the dup goes through.</li>
+        <li><b>safe-linking</b> (since 2.32): the stored <code>fd</code> is mangled, <code>(pos » 12) ^ ptr</code>. The playground shows both the value you want returned and the mangled bytes you'd actually have to write at <code>pos</code>.</li>
+      </ul>
+      <h4>Deliberately left out</h4>
+      <p><span class="cs">Chunk consolidation (forward/backward), small/large-bin sorting and binning, last-remainder nuances, per-thread arenas, and the top-chunk size integrity checks.</span> They don't change the tcache/fastbin lessons and add noise. Treat returned sizes and the key as representative, not byte-exact to any one release.</p>
+    </div>
+  </details>
+</div>
+
+<script>
+"use strict";
+(function(){
+  // ---------- constants ----------
+  const SIZE_SZ=8, ALIGN=16, MINSIZE=32, TC_MAX=0x410, FAST_MAX=0x80;
+  const HEAP_BASE=0x5555559ebn * 0x1000n; // 0x5555559eb000
+  const TC_STRUCT=0x290n;                   // tcache_perthread_struct region
+  const TARGET=0x5555559ec650n;             // stand-in "attacker target" (e.g. a GOT / tls slot)
+  const MASK12=(1n<<64n)-1n;
+  // random per-heap tcache key (mimics 2.34+); fixed for the session
+  const TCACHE_KEY=0x8f2ad6c0e51b7340n;
+
+  // ---------- state ----------
+  let S;
+  function freshState(){
+    return {
+      topAddr: HEAP_BASE + TC_STRUCT,
+      topSize: 0x20d60,
+      chunks: [],            // {id,label,addr(BigInt),req,size,state,next(BigInt|null),key(BigInt|null),outside}
+      tcache: {},            // tidx -> {head:BigInt|null, count:int}
+      fast: {},              // fidx -> {head:BigInt|null}
+      unsorted: [],          // array of ids, front = most recent
+      lab: 0, id: 0,
+      pending: [], pIdx: 0, pTitle: "",
+      safe: elSafe.checked,
+      tcLimit: clampInt(elTc.value,1,20,7),
+      flashIds: new Set(),
+    };
+  }
+  const LABELS="ABCDEFGHJKLMNPQRSTUVWXYZ";
+  function nextLabel(){ const n=S.lab++; return n<LABELS.length?LABELS[n]:("c"+n); }
+
+  // ---------- helpers ----------
+  function clampInt(v,lo,hi,dflt){ v=parseInt(v,10); if(isNaN(v))return dflt; return Math.max(lo,Math.min(hi,v)); }
+  function fmt(a){ if(a===null||a===undefined) return "NULL"; return "0x"+a.toString(16).padStart(12,"0"); }
+  function parseHex(s){ s=(s||"").trim(); if(!s) return null; try{ return BigInt(s.startsWith("0x")||s.startsWith("0X")?s:("0x"+s)) & MASK12; }catch(e){ return undefined; } }
+  function req2size(req){ const t=req+SIZE_SZ+(ALIGN-1); return (t<MINSIZE)?MINSIZE:(t & ~(ALIGN-1)); }
+  function tidx(sz){ return ((sz-MINSIZE+ALIGN-1)/ALIGN)|0; }
+  function fidx(sz){ return (sz>>4)-2; }
+  function tcOk(sz){ return sz>=MINSIZE && sz<=TC_MAX; }
+  function fastOk(sz){ return sz>=MINSIZE && sz<=FAST_MAX; }
+  function protectPtr(pos,ptr){ return ((pos>>12n) ^ ptr) & MASK12; }  // == reveal (involution)
+  function byAddr(a){ if(a===null)return null; const s=a.toString(); return S.chunks.find(c=>c.addr.toString()===s)||null; }
+  function byId(id){ return S.chunks.find(c=>c.id===id)||null; }
+  function userPtr(c){ return c.addr+0x10n; }
+
+  // ---------- log ----------
+  function log(cls,parts){
+    const d=document.createElement("div"); d.className="ln "+cls;
+    if(typeof parts==="string"){ d.textContent=parts; }
+    else { parts.forEach(p=>{ if(typeof p==="string"){ d.appendChild(document.createTextNode(p)); }
+      else { const s=document.createElement("span"); s.className=p.c; s.textContent=p.t; d.appendChild(s); } }); }
+    elLog.appendChild(d);
+    while(elLog.children.length>220) elLog.removeChild(elLog.firstChild);
+    elLog.scrollTop=elLog.scrollHeight;
+    opCount++; elOpCount.textContent=opCount+" ops";
+  }
+  let opCount=0;
+
+  // ---------- core: malloc ----------
+  function doMalloc(req, silent){
+    req=clampInt(req,0,200000,0);
+    const sz=req2size(req);
+    let c=null, via="";
+
+    // 1. tcache (exact idx)
+    if(tcOk(sz)){
+      const i=tidx(sz), b=S.tcache[i];
+      if(b && b.head!==null && b.count>0){
+        const vAddr=b.head; const victim=byAddr(vAddr);
+        const nxt = victim ? victim.next : null;
+        b.head = nxt; b.count--;
+        if(victim){ victim.state="alloc"; victim.next=null; victim.key=null; c=victim; }
+        else { c=materialize(vAddr,req,sz); } // poisoned head pointed here
+        // if new head points into unmapped/"fake" space, leave it; it materializes on next pop
+        via="tcache 0x"+sz.toString(16);
+        flash(c.id);
+        if(!silent) log("ok",[{c:"p",t:"malloc"},`(${req}) = `,{c:"p",t:fmt(userPtr(c))},`   [${via}]`]);
+        afterOp(); return c;
+      }
+    }
+    // 2. fastbin (exact idx)
+    if(fastOk(sz)){
+      const i=fidx(sz), b=S.fast[i];
+      if(b && b.head!==null){
+        const vAddr=b.head; const victim=byAddr(vAddr);
+        const nxt = victim ? victim.next : null;
+        b.head = nxt;
+        if(victim){ victim.state="alloc"; victim.next=null; c=victim; }
+        else { c=materialize(vAddr,req,sz); }
+        via="fastbin 0x"+sz.toString(16);
+        flash(c.id);
+        if(!silent) log("ok",[{c:"p",t:"malloc"},`(${req}) = `,{c:"p",t:fmt(userPtr(c))},`   [${via}]`]);
+        afterOp(); return c;
+      }
+    }
+    // 3. unsorted (first fit, split remainder back to unsorted)
+    for(let k=0;k<S.unsorted.length;k++){
+      const victim=byId(S.unsorted[k]);
+      if(!victim) continue;
+      if(victim.size>=sz){
+        S.unsorted.splice(k,1);
+        if(victim.size-sz>=MINSIZE){
+          const remAddr=victim.addr+BigInt(sz), remSz=victim.size-sz;
+          victim.size=sz;
+          const rem=mkChunk(remAddr, remSz-SIZE_SZ, remSz, "free-unsorted");
+          rem.label="rem"; rem.next=null; rem.key=null;
+          S.unsorted.unshift(rem.id);
+          via="unsorted split, remainder "+fmt(userPtr(rem));
+        } else { via="unsorted exact 0x"+victim.size.toString(16); }
+        victim.state="alloc"; victim.next=null; victim.key=null; victim.req=req; c=victim;
+        flash(c.id);
+        if(!silent) log("ok",[{c:"p",t:"malloc"},`(${req}) = `,{c:"p",t:fmt(userPtr(c))},`   [${via}]`]);
+        afterOp(); return c;
+      }
+    }
+    // 4. top chunk
+    if(S.topSize < sz+MINSIZE){ S.topSize += 0x21000; log("in","// top too small → sbrk extend, top size now 0x"+S.topSize.toString(16)); }
+    c=mkChunk(S.topAddr, sz-SIZE_SZ, sz, "alloc");
+    c.req=req; S.topAddr+=BigInt(sz); S.topSize-=sz;
+    via="top";
+    flash(c.id);
+    if(!silent) log("ok",[{c:"p",t:"malloc"},`(${req}) = `,{c:"p",t:fmt(userPtr(c))},`   [${via}]`]);
+    afterOp(); return c;
+  }
+
+  function mkChunk(addr, req, size, state){
+    const c={id:S.id++, label:nextLabel(), addr, req, size, state, next:null, key:null, outside:false};
+    S.chunks.push(c); return c;
+  }
+  function materialize(addr, req, sz){
+    // allocation handed out a pointer that was never a real chunk (poisoned fd) → attacker-controlled write
+    const c={id:S.id++, label:"T"+(++fakeN), addr, req, size:sz, state:"alloc", next:null, key:null, outside:true};
+    S.chunks.push(c);
+    log("rm",[{c:"p",t:"⚠ arbitrary alloc"},`  chunk at `,{c:"p",t:fmt(addr)},`  → write primitive at `,{c:"p",t:fmt(userPtr(c))}]);
+    return c;
+  }
+  let fakeN=0;
+
+  // ---------- core: free ----------
+  function doFree(id, silent){
+    const c=byId(id);
+    if(!c){ log("ab","free(): no such chunk"); return; }
+    if(c.state!=="alloc"){
+      // freeing something already free -> let the detectors speak below, but only if it's in-band
+      log("ab",[{c:"p",t:"free"},`(${fmt(userPtr(c))})  `,"already free: ",{c:"p",t:c.state}]);
+      return;
+    }
+    const sz=c.size;
+
+    // tcache
+    if(tcOk(sz)){
+      const i=tidx(sz); const b=S.tcache[i]||(S.tcache[i]={head:null,count:0});
+      // double-free detection via key
+      if(c.key===TCACHE_KEY && tcacheContains(i,c.addr)){
+        log("ab",[{c:"p",t:"free"},`(${fmt(userPtr(c))}): `,"double free detected in tcache 2"]);
+        flash(c.id); afterOp(); return;
+      }
+      if(b.count < S.tcLimit){
+        c.state="free-tcache"; c.key=TCACHE_KEY; c.next=b.head;
+        b.head=c.addr; b.count++;
+        flash(c.id);
+        if(!silent) log("rm",[{c:"p",t:"free"},`(${fmt(userPtr(c))})   [tcache 0x`+sz.toString(16)+`  #${b.count}/${S.tcLimit}]`]);
+        afterOp(); return;
+      }
+      // bin full -> fall through
+    }
+    // fastbin
+    if(fastOk(sz)){
+      const i=fidx(sz); const b=S.fast[i]||(S.fast[i]={head:null});
+      if(b.head!==null && b.head.toString()===c.addr.toString()){
+        log("ab",[{c:"p",t:"free"},`(${fmt(userPtr(c))}): `,"double free or corruption (fasttop)"]);
+        flash(c.id); afterOp(); return;
+      }
+      c.state="free-fast"; c.key=null; c.next=b.head; b.head=c.addr;
+      flash(c.id);
+      if(!silent) log("rm",[{c:"p",t:"free"},`(${fmt(userPtr(c))})   [fastbin 0x`+sz.toString(16)+`]`]);
+      afterOp(); return;
+    }
+    // unsorted
+    c.state="free-unsorted"; c.key=null; c.next=null; S.unsorted.unshift(c.id);
+    flash(c.id);
+    if(!silent) log("rm",[{c:"p",t:"free"},`(${fmt(userPtr(c))})   [unsorted 0x`+sz.toString(16)+`]`]);
+    afterOp();
+  }
+  function tcacheContains(i,addr){
+    const b=S.tcache[i]; if(!b) return false; let p=b.head, guard=0;
+    while(p!==null && guard++<64){ if(p.toString()===addr.toString()) return true; const c=byAddr(p); p=c?c.next:null; }
+    return false;
+  }
+
+  // ---------- core: edit ----------
+  function doEdit(id, nextHex, keyHex, silent){
+    const c=byId(id); if(!c){ log("ab","edit: no such chunk"); return; }
+    const changes=[];
+    if(nextHex){
+      const v=parseHex(nextHex);
+      if(v===undefined){ log("ab","edit: bad fd value"); return; }
+      c.next=v; changes.push(["fd/next → ",fmt(v)]);
+    }
+    if(keyHex){
+      const v=parseHex(keyHex);
+      if(v===undefined){ log("ab","edit: bad key value"); return; }
+      c.key = (v===0n? null : v); changes.push(["key → ",fmt(v)]);
+    }
+    if(!changes.length){ log("in","edit: nothing to write"); return; }
+    flash(c.id);
+    const parts=[{c:"p",t:"edit"},`(${fmt(userPtr(c))})  `];
+    changes.forEach((ch,k)=>{ if(k)parts.push("  ·  "); parts.push(ch[0]); parts.push({c:"p",t:ch[1]}); });
+    if(!silent) log("io",parts);
+    afterOp();
+  }
+
+  // ---------- render ----------
+  function afterOp(){ render(); setTimeout(()=>{ S.flashIds.clear(); },20); }
+  function flash(id){ S.flashIds.add(id); }
+
+  function render(){ renderHeap(); renderBins(); refreshSelects(); renderQueue(); updateM2S(); }
+
+  function renderHeap(){
+    elHeap.innerHTML="";
+    // tcache_perthread_struct region (non-interactive)
+    const reg=document.createElement("div"); reg.className="region";
+    reg.textContent="tcache_perthread_struct  "+fmt(HEAP_BASE+0x10n)+"  (0x290)";
+    elHeap.appendChild(reg);
+
+    // real + fake chunks, sorted by address
+    const list=S.chunks.slice().sort((a,b)=> a.addr<b.addr?-1:a.addr>b.addr?1:0);
+    let shown=0;
+    list.forEach(c=>{ elHeap.appendChild(chunkEl(c)); shown++; });
+
+    // top chunk
+    elHeap.appendChild(topEl());
+    elHeapCount.textContent=shown+" chunk"+(shown===1?"":"s");
+    if(shown===0){ const n=document.createElement("div"); n.className="empty-note"; n.textContent="no chunks yet, malloc something"; elHeap.insertBefore(n, elHeap.lastChild); }
+  }
+
+  function flagStr(c){
+    // P (PREV_INUSE) is set unless the previous chunk is a freed, consolidatable chunk.
+    const P = !prevIsConsolidated(c) ? 1 : 0;
+    return "0x"+c.size.toString(16)+ (P? " | PREV_INUSE":"");
+  }
+  function prevIsConsolidated(c){
+    // in this model only unsorted frees clear the next chunk's PREV_INUSE
+    const prevAddrGuess=null; // simplified: treat as in-use (we don't track neighbour merges)
+    return false;
+  }
+
+  function chunkEl(c){
+    const d=document.createElement("div");
+    let kind = c.outside?"fake": c.state==="alloc"?"alloc":"freed";
+    d.className="chunk "+kind+(S.flashIds.has(c.id)?" flash":"");
+    const bar=document.createElement("div"); bar.className="cbar"; d.appendChild(bar);
+
+    const row=document.createElement("div"); row.className="crow";
+    const addr=document.createElement("div"); addr.className="addr"; addr.textContent=fmt(c.addr);
+    const mid=document.createElement("div"); mid.className="mid";
+    const sz=document.createElement("div"); sz.className="sz";
+
+    let tagCls = c.outside?"fake": c.state==="alloc"?"alloc": c.state==="free-tcache"||c.state==="free-fast"||c.state==="free-unsorted"?"freed":"alloc";
+    let tagTxt = c.outside?"controlled":
+                 c.state==="alloc"?"in use":
+                 c.state==="free-tcache"?"tcache":
+                 c.state==="free-fast"?"fastbin":
+                 c.state==="free-unsorted"?"unsorted":"";
+
+    mid.innerHTML = `<span class="lab">${c.label}</span> <span class="meta">`+
+      (c.state==="alloc"? `ptr ${fmt(userPtr(c))} · req ${c.req}` : `ptr ${fmt(userPtr(c))}`)+
+      `</span>`;
+    sz.innerHTML = `<span>0x${c.size.toString(16)}</span><div class="flags">size: ${flagStr(c)}</div>`;
+
+    const tag=document.createElement("span"); tag.className="tag "+tagCls; tag.textContent=tagTxt;
+    const tagWrap=document.createElement("div"); tagWrap.appendChild(tag);
+
+    row.appendChild(addr); row.appendChild(mid); row.appendChild(sz); row.appendChild(tagWrap);
+    // reflow: tag should sit with size; use grid col auto already. Put tag before sz visually:
+    row.innerHTML="";
+    row.appendChild(addr); row.appendChild(mid);
+    const rt=document.createElement("div"); rt.style.display="flex"; rt.style.flexDirection="column"; rt.style.alignItems="flex-end"; rt.style.gap="3px";
+    rt.appendChild(tag); rt.appendChild(sz); row.appendChild(rt);
+    d.appendChild(row);
+
+    // fd / key line for freed chunks (and edited chunks)
+    if(c.state==="free-tcache"||c.state==="free-fast"||(c.next!==null)){
+      const fd=document.createElement("div"); fd.className="fd";
+      const pos=userPtr(c);
+      const stored = (S.safe && c.next!==null) ? protectPtr(pos,c.next) : c.next;
+      let html="";
+      if(c.next!==null){
+        html += `fd → <b>${fmt(c.next)}</b>`;
+        if(S.safe && c.next!==null){ html += ` <span class="mg">(in memory: ${fmt(stored)})</span>`; }
+      } else {
+        html += `fd → <b>NULL</b>`;
+      }
+      if(c.state==="free-tcache"){
+        html += `key: <b>${c.key!==null?fmt(c.key):"0x0 (cleared)"}</b>`;
+      } else if(c.key!==null){
+        html += `key: <b>${fmt(c.key)}</b>`;
+      }
+      fd.innerHTML=html;
+      d.appendChild(fd);
+    }
+    return d;
+  }
+
+  function topEl(){
+    const d=document.createElement("div"); d.className="chunk topc";
+    const bar=document.createElement("div"); bar.className="cbar"; d.appendChild(bar);
+    const row=document.createElement("div"); row.className="crow";
+    const addr=document.createElement("div"); addr.className="addr"; addr.textContent=fmt(S.topAddr);
+    const mid=document.createElement("div"); mid.className="mid"; mid.innerHTML=`<span class="lab">top</span> <span class="meta">wilderness</span>`;
+    const rt=document.createElement("div"); rt.style.display="flex"; rt.style.flexDirection="column"; rt.style.alignItems="flex-end"; rt.style.gap="3px";
+    const tag=document.createElement("span"); tag.className="tag top"; tag.textContent="top";
+    const sz=document.createElement("div"); sz.className="sz"; sz.innerHTML=`<span>0x${S.topSize.toString(16)}</span><div class="flags">size: 0x${S.topSize.toString(16)} | PREV_INUSE</div>`;
+    rt.appendChild(tag); rt.appendChild(sz);
+    row.appendChild(addr); row.appendChild(mid); row.appendChild(rt);
+    d.appendChild(row); return d;
+  }
+
+  function renderBins(){
+    elBins.innerHTML="";
+    elBins.appendChild(binSection("tcache", "singly linked · LIFO · idx by size", tcacheBins()));
+    elBins.appendChild(binSection("fastbins", "singly linked · LIFO · ≤ 0x80", fastBins()));
+    elBins.appendChild(binSection("unsorted bin", "doubly linked · fd ⇄ bk", unsortedBin()));
+  }
+  function binSection(title, scap, rowsFrag){
+    const sec=document.createElement("div"); sec.className="binsec";
+    const h=document.createElement("h3"); h.innerHTML=`${title} <span class="sc">${scap}</span>`;
+    sec.appendChild(h);
+    if(rowsFrag.childElementCount===0){ const e=document.createElement("div"); e.className="bins-empty"; e.textContent="all empty"; sec.appendChild(e); }
+    else sec.appendChild(rowsFrag);
+    return sec;
+  }
+  function tcacheBins(){
+    const frag=document.createDocumentFragment();
+    Object.keys(S.tcache).map(Number).sort((a,b)=>a-b).forEach(i=>{
+      const b=S.tcache[i]; if(!b||b.head===null||b.count===0) return;
+      const sz=MINSIZE+i*ALIGN;
+      frag.appendChild(binRow("0x"+sz.toString(16), `[${b.count}]`, walkSingly(b.head, b.count+8)));
+    });
+    return frag;
+  }
+  function fastBins(){
+    const frag=document.createDocumentFragment();
+    Object.keys(S.fast).map(Number).sort((a,b)=>a-b).forEach(i=>{
+      const b=S.fast[i]; if(!b||b.head===null) return;
+      const sz=(i+2)*ALIGN;
+      frag.appendChild(binRow("0x"+sz.toString(16), "", walkSingly(b.head, 24)));
+    });
+    return frag;
+  }
+  function unsortedBin(){
+    const frag=document.createDocumentFragment();
+    if(S.unsorted.length){
+      const nodes=S.unsorted.map(id=>{ const c=byId(id); return c?{txt:c.label+" "+fmt(c.addr), fake:false}:{txt:"?",fake:true}; });
+      frag.appendChild(binRow("list", `[${S.unsorted.length}]`, nodesToChain(nodes,true)));
+    }
+    return frag;
+  }
+  function walkSingly(head, max){
+    const nodes=[]; let p=head, guard=0;
+    while(p!==null && guard++<max){
+      const c=byAddr(p);
+      if(c){ nodes.push({txt:c.label+" "+fmt(c.addr), fake:c.outside}); p=c.next; }
+      else { nodes.push({txt:fmt(p)+" ?", fake:true}); break; } // poisoned / unknown target
+    }
+    return nodesToChain(nodes,false);
+  }
+  function nodesToChain(nodes, dbl){
+    const span=document.createElement("span"); span.style.display="contents";
+    const headTok=document.createElement("span"); headTok.className="arrow"; headTok.textContent="head "+(dbl?"⇄":"→")+" ";
+    span.appendChild(headTok);
+    nodes.forEach((n,k)=>{
+      if(k){ const a=document.createElement("span"); a.className="arrow"; a.textContent=dbl?" ⇄ ":" → "; span.appendChild(a); }
+      const el=document.createElement("span"); el.className="node"+(n.fake?" fakeN":""); el.textContent=n.txt; span.appendChild(el);
+    });
+    const nul=document.createElement("span"); nul.className="arrow"; nul.textContent=dbl?"":" → ";
+    span.appendChild(nul);
+    if(!dbl){ const z=document.createElement("span"); z.className="nul"; z.textContent="NULL"; span.appendChild(z); }
+    return span;
+  }
+  function binRow(key, cnt, chainEl){
+    const r=document.createElement("div"); r.className="bin";
+    const k=document.createElement("span"); k.className="bk"; k.textContent=key; r.appendChild(k);
+    if(cnt){ const c=document.createElement("span"); c.className="cnt"; c.textContent=cnt; r.appendChild(c); }
+    r.appendChild(chainEl); return r;
+  }
+
+  // ---------- selects ----------
+  function refreshSelects(){
+    const alloc=S.chunks.filter(c=>c.state==="alloc");
+    const any=S.chunks.slice();
+    fillSel(elFsel, alloc, "no live allocations");
+    fillSel(elEsel, any, "nothing to edit");
+  }
+  function fillSel(sel, arr, emptyTxt){
+    const prev=sel.value;
+    sel.innerHTML="";
+    if(!arr.length){ const o=document.createElement("option"); o.value=""; o.textContent=emptyTxt; o.disabled=true; sel.appendChild(o); sel.disabled=true; return; }
+    sel.disabled=false;
+    arr.sort((a,b)=> a.addr<b.addr?-1:1).forEach(c=>{
+      const o=document.createElement("option"); o.value=String(c.id);
+      const st = c.state==="alloc"?"":" ("+c.state.replace("free-","")+")";
+      o.textContent=`${c.label} · ${fmt(userPtr(c))}${st}`;
+      sel.appendChild(o);
+    });
+    if([...sel.options].some(o=>o.value===prev)) sel.value=prev;
+  }
+
+  function updateM2S(){
+    const req=clampInt(elReq.value,0,200000,0);
+    const sz=req2size(req);
+    let where = tcOk(sz)? `tcache idx ${tidx(sz)}` : fastOk(sz)? `fastbin idx ${fidx(sz)}` : "small/large (unsorted)";
+    elM2S.textContent=`request ${req} → chunk 0x${sz.toString(16)} · ${where}`;
+  }
+
+  // ---------- queue / step runner ----------
+  let runTimer=null;
+  function loadScenario(name, title, ops){
+    stopRun();
+    S.pending=ops.slice(); S.pIdx=0; S.pTitle=title;
+    log("cm","// scenario loaded: "+title);
+    renderQueue();
+  }
+  function renderQueue(){
+    if(!S.pending.length){ elQueue.classList.add("empty"); return; }
+    elQueue.classList.remove("empty");
+    elQTitle.textContent=S.pTitle||"queued steps";
+    elQList.innerHTML="";
+    S.pending.forEach((op,k)=>{
+      const d=document.createElement("div");
+      d.className="qi"+(k===S.pIdx?" next":"")+(k<S.pIdx?" done":"");
+      d.innerHTML=`<span class="qx">${String(k+1).padStart(2,"0")}</span><span>${opText(op)}</span>`;
+      elQList.appendChild(d);
+    });
+    elQN.textContent=`${S.pIdx}/${S.pending.length}`;
+    const done=S.pIdx>=S.pending.length;
+    elStep.disabled=done; elRun.disabled=done;
+  }
+  function opText(op){
+    if(op.op==="malloc") return `malloc(${op.req})`;
+    if(op.op==="free") return `free(${op.ref})`;
+    if(op.op==="edit"){ const bits=[]; if(op.next)bits.push("fd="+op.next); if(op.key!==undefined)bits.push("key="+op.key); return `edit(${op.ref}, ${bits.join(", ")})`; }
+    if(op.op==="note") return "// "+op.text;
+    return "?";
+  }
+  function stepOnce(){
+    if(S.pIdx>=S.pending.length) return false;
+    const op=S.pending[S.pIdx++];
+    runOp(op);
+    renderQueue();
+    return S.pIdx<S.pending.length;
+  }
+  const refMap={}; // scenario label -> chunk id
+  function runOp(op){
+    if(op.op==="note"){ log("cm","// "+op.text); return; }
+    if(op.op==="malloc"){ const c=doMalloc(op.req); if(op.as) refMap[op.as]=c.id; return; }
+    if(op.op==="free"){ const id=resolveRef(op.ref); if(id!=null) doFree(id); return; }
+    if(op.op==="edit"){ const id=resolveRef(op.ref); if(id!=null) doEdit(id, op.next||"", op.key!==undefined?op.key:"", false); return; }
+  }
+  function resolveRef(ref){
+    if(ref in refMap) return refMap[ref];
+    const c=S.chunks.find(x=>x.label===ref); return c?c.id:null;
+  }
+  function runAll(){ stopRun(); runTimer=setInterval(()=>{ if(!stepOnce()){ stopRun(); } },360); }
+  function stopRun(){ if(runTimer){ clearInterval(runTimer); runTimer=null; } }
+  function clearQueue(){ stopRun(); S.pending=[]; S.pIdx=0; renderQueue(); }
+
+  // ---------- scenarios ----------
+  const SCN=[
+    { id:"tc-poison", t:"tcache poisoning", d:"fd overwrite → arbitrary malloc",
+      title:"tcache poisoning",
+      ops:()=>[
+        {op:"note",text:"two same-size chunks"},
+        {op:"malloc",req:24,as:"A"},{op:"malloc",req:24,as:"B"},
+        {op:"note",text:"free both → tcache: B → A"},
+        {op:"free",ref:"A"},{op:"free",ref:"B"},
+        {op:"note",text:"overwrite B.fd to point at the target"},
+        {op:"edit",ref:"B",next:fmt(TARGET)},
+        {op:"note",text:"malloc B back, then malloc returns the target"},
+        {op:"malloc",req:24},{op:"malloc",req:24},
+      ]},
+    { id:"fast-dup", t:"fastbin dup", d:"single fasttop check bypass",
+      title:"fastbin double-free (dup)",
+      ops:()=>{
+        const o=[{op:"note",text:"fill tcache[0x40] so frees spill to fastbin"}];
+        for(let k=0;k<9;k++) o.push({op:"malloc",req:56,as:"f"+k});
+        for(let k=0;k<7;k++) o.push({op:"free",ref:"f"+k}); // fills 7-slot tcache bin
+        o.push({op:"note",text:"now dup: free A, free B, free A"});
+        o.push({op:"free",ref:"f7"});          // A -> fastbin
+        o.push({op:"free",ref:"f8"});          // B -> fastbin (breaks fasttop==A)
+        o.push({op:"free",ref:"f7"});          // A again -> dup goes through
+        o.push({op:"note",text:"fastbin now holds A → B → A (A is in twice)"});
+        return o;
+      }},
+    { id:"uaf", t:"use-after-free", d:"freed chunk re-handed out",
+      title:"use-after-free aliasing",
+      ops:()=>[
+        {op:"malloc",req:40,as:"A"},
+        {op:"note",text:"free A but keep using the pointer"},
+        {op:"free",ref:"A"},
+        {op:"note",text:"same-size malloc returns the very same chunk"},
+        {op:"malloc",req:40,as:"B"},
+        {op:"note",text:"B and the stale A pointer alias the same memory"},
+      ]},
+    { id:"df-abort", t:"tcache double-free", d:"key check aborts",
+      title:"tcache double-free (caught)",
+      ops:()=>[
+        {op:"malloc",req:24,as:"A"},
+        {op:"free",ref:"A"},
+        {op:"note",text:"second free: key matches → abort"},
+        {op:"free",ref:"A"},
+      ]},
+    { id:"df-bypass", t:"double-free bypass", d:"clear the key, then poison",
+      title:"tcache double-free bypass",
+      ops:()=>[
+        {op:"malloc",req:24,as:"A"},{op:"malloc",req:24,as:"B"},
+        {op:"free",ref:"A"},
+        {op:"note",text:"corrupt A.key so the detector misses it"},
+        {op:"edit",ref:"A",key:"0x0"},
+        {op:"note",text:"free A again, now allowed, bin: A → A"},
+        {op:"free",ref:"A"},
+        {op:"note",text:"A is in the bin twice; malloc twice to alias"},
+        {op:"malloc",req:24},{op:"malloc",req:24},
+      ]},
+  ];
+
+  // ---------- seed sample ----------
+  function seedSample(){
+    const a=doMalloc(24,true); const b=doMalloc(40,true); const c=doMalloc(24,true);
+    doFree(c.id,true);
+    log("cm","// sample state: A,B in use · C freed into tcache[0x20]");
+    render();
+  }
+
+  // ---------- reset ----------
+  function resetHeap(keepLog){
+    stopRun(); fakeN=0; for(const k in refMap) delete refMap[k];
+    if(!keepLog){ elLog.innerHTML=""; opCount=0; elOpCount.textContent="0 ops"; }
+    S=freshState();
+    elBase.textContent=fmt(HEAP_BASE);
+    elBaseChip.textContent=fmt(HEAP_BASE);
+    clearQueue();
+    log("cm","// heap reset · glibc ~2.39 model · safe-linking "+(S.safe?"on":"off"));
+    seedSample();
+  }
+
+  // ---------- element refs ----------
+  const $=id=>document.getElementById(id);
+  const elReq=$("mreq"), elM2S=$("m2s"), elMbtn=$("mbtn");
+  const elFsel=$("fsel"), elFbtn=$("fbtn");
+  const elEsel=$("esel"), elEnext=$("enext"), elEkey=$("ekey"), elEbtn=$("ebtn");
+  const elSafe=$("osafe"), elTc=$("otc");
+  const elScn=$("scn"), elRbtn=$("rbtn");
+  const elHeap=$("heap"), elBins=$("bins"), elLog=$("log");
+  const elHeapCount=$("heapcount"), elOpCount=$("opcount");
+  const elBase=$("basechip"), elBaseChip=$("basechip"), elVer=$("verchip");
+  const elQueue=$("queue"), elQList=$("qlist"), elQN=$("qn"), elQTitle=$("qtitle");
+  const elStep=$("stepbtn"), elRun=$("runbtn"), elClrQ=$("clrq");
+
+  // ---------- wiring ----------
+  elMbtn.addEventListener("click",()=>{ doMalloc(elReq.value); });
+  elReq.addEventListener("input",updateM2S);
+  elReq.addEventListener("keydown",e=>{ if(e.key==="Enter") doMalloc(elReq.value); });
+  elFbtn.addEventListener("click",()=>{ if(elFsel.value!=="") doFree(parseInt(elFsel.value,10)); });
+  elEbtn.addEventListener("click",()=>{ if(elEsel.value!==""){ doEdit(parseInt(elEsel.value,10), elEnext.value, elEkey.value); elEnext.value=""; elEkey.value=""; } });
+  elSafe.addEventListener("change",()=>{ S.safe=elSafe.checked; log("in","// safe-linking "+(S.safe?"enabled (2.32+)":"disabled (pre-2.32)")); render(); });
+  elTc.addEventListener("change",()=>{ S.tcLimit=clampInt(elTc.value,1,20,7); elTc.value=S.tcLimit; log("in","// tcache bin limit = "+S.tcLimit); });
+  elRbtn.addEventListener("click",()=>resetHeap(false));
+  elStep.addEventListener("click",stepOnce);
+  elRun.addEventListener("click",runAll);
+  elClrQ.addEventListener("click",clearQueue);
+
+  SCN.forEach(s=>{
+    const b=document.createElement("button");
+    b.innerHTML=`<span class="t">${s.t}</span><span class="d">${s.d}</span>`;
+    b.addEventListener("click",()=>{ resetHeap(true); log("cm","//"); loadScenario(s.id,s.title,s.ops()); });
+    elScn.appendChild(b);
+  });
+
+  // ---------- boot ----------
+  elVer.textContent="~2.39";
+  resetHeap(false);
+})();
+</script>
